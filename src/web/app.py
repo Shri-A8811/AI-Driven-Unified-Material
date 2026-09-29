@@ -18,6 +18,7 @@ from src.engine.ingestion import ingest_and_normalize_records
 from src.engine.clusterer import cluster_materials_by_similarity, DuplicateCluster
 from src.engine.mapping_registry import MappingRegistry, MappingRecord
 from src.taxonomy.unspcs_rules import lookup_taxonomy_for_item_type
+from src.governance.audit_ledger import TamperEvidentAuditLedger
 
 app = FastAPI(
     title="National Material Master Harmonizer API",
@@ -29,11 +30,12 @@ app = FastAPI(
 NORMALIZED_STORE: List[NormalizedMaterial] = []
 CLUSTER_STORE: Dict[str, DuplicateCluster] = {}
 REGISTRY = MappingRegistry()
+AUDIT_LEDGER = TamperEvidentAuditLedger()
 
 
 def initialize_sample_data():
     """Initializes the engine with curated multi-CPSE datasets."""
-    global NORMALIZED_STORE, CLUSTER_STORE, REGISTRY
+    global NORMALIZED_STORE, CLUSTER_STORE, REGISTRY, AUDIT_LEDGER
     NORMALIZED_STORE = ingest_and_normalize_records(SAMPLE_CPSE_DATASETS)
     clusters = cluster_materials_by_similarity(NORMALIZED_STORE, confidence_threshold=75.0)
     CLUSTER_STORE = {c.cluster_id: c for c in clusters}
@@ -41,7 +43,14 @@ def initialize_sample_data():
     # Automatically pre-harmonize one cluster (e.g. Cluster 1 - Valves) to show active history
     valve_cluster = next((c for c in clusters if "VALVE" in c.canonical_description), None)
     if valve_cluster:
-        REGISTRY.harmonize_cluster(valve_cluster, approved_by="DIRECTOR_PROCUREMENT_COMMITTEE")
+        issued_cnmc = REGISTRY.harmonize_cluster(valve_cluster, approved_by="DIRECTOR_PROCUREMENT_COMMITTEE")
+        AUDIT_LEDGER.append_event(
+            actor="DIRECTOR_PROCUREMENT_COMMITTEE (APPROVER)",
+            action="APPROVE_CLUSTER",
+            cluster_id=valve_cluster.cluster_id,
+            assigned_cnmc=issued_cnmc,
+            participating_records=[f"{r.cpse_id.value}::{r.local_material_code}" for r in valve_cluster.records]
+        )
 
 
 # Run initialization on import
@@ -150,6 +159,13 @@ def manual_map_material(req: ManualMapRequest):
         role=req.role,
         justification=req.justification
     )
+    AUDIT_LEDGER.append_event(
+        actor=f"{req.mapped_by} ({req.role})",
+        action="MANUAL_MAP",
+        cluster_id=None,
+        assigned_cnmc=req.target_cnmc,
+        participating_records=[f"{req.cpse_id.upper()}::{req.local_material_code}"]
+    )
     return {"status": "SUCCESS", "message": "Material manually mapped successfully", "record": record}
 
 
@@ -173,6 +189,14 @@ def revert_mapping(req: RevertMappingRequest):
         item.assigned_cnmc = None
         item.match_status = MatchStatus.CANDIDATE_MATCH
 
+    AUDIT_LEDGER.append_event(
+        actor=req.reverted_by,
+        action="REVERT_MAPPING",
+        cluster_id=None,
+        assigned_cnmc=reverted.assigned_cnmc,
+        participating_records=[f"{req.cpse_id.upper()}::{req.local_material_code}"]
+    )
+
     return {"status": "SUCCESS", "message": "Mapping reverted and deactivated", "reverted_record": reverted}
 
 
@@ -189,6 +213,15 @@ def approve_cluster(cluster_id: str, req: ApprovalRequest):
         approved_by_role=req.role,
         justification_comment=req.justification
     )
+
+    AUDIT_LEDGER.append_event(
+        actor=f"{req.approved_by} ({req.role})",
+        action="APPROVE_CLUSTER",
+        cluster_id=cluster_id,
+        assigned_cnmc=issued_cnmc,
+        participating_records=[f"{r.cpse_id.value}::{r.local_material_code}" for r in cluster.records]
+    )
+
     return {
         "status": "SUCCESS",
         "cluster_id": cluster_id,
@@ -201,6 +234,19 @@ def approve_cluster(cluster_id: str, req: ApprovalRequest):
     }
 
 
+@app.get("/api/governance/ledger")
+def get_governance_ledger():
+    """
+    Requirement 7 & 9: Tamper-evident cryptographically chained audit ledger.
+    """
+    is_valid = AUDIT_LEDGER.verify_integrity()
+    return {
+        "integrity_verified": is_valid,
+        "total_blocks": len(AUDIT_LEDGER.chain),
+        "chain": [tx.model_dump() for tx in reversed(AUDIT_LEDGER.chain)]
+    }
+
+
 @app.post("/api/clusters/{cluster_id}/reject")
 def reject_cluster(cluster_id: str):
     cluster = CLUSTER_STORE.get(cluster_id)
@@ -209,6 +255,15 @@ def reject_cluster(cluster_id: str):
     cluster.status = "REJECTED"
     for r in cluster.records:
         r.match_status = MatchStatus.REJECTED
+
+    AUDIT_LEDGER.append_event(
+        actor="REVIEWER",
+        action="REJECT_CLUSTER",
+        cluster_id=cluster_id,
+        assigned_cnmc=None,
+        participating_records=[f"{r.cpse_id.value}::{r.local_material_code}" for r in cluster.records]
+    )
+
     return {"status": "REJECTED", "cluster_id": cluster_id}
 
 

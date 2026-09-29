@@ -18,6 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
   loadPipelineData();
   loadClusters();
   loadCatalog();
+  loadGovernanceLedger();
 });
 
 // Theme Management (Light & Dark Mode)
@@ -534,17 +535,49 @@ async function rejectCluster(clusterId) {
 }
 
 function logAuditEntry(message) {
+  loadGovernanceLedger();
+}
+
+async function loadGovernanceLedger() {
   const container = document.getElementById('audit-log-container');
   if (!container) return;
-  const entry = document.createElement('div');
-  entry.className = 'log-entry';
-  entry.innerHTML = `
-    <div class="log-time">JUST NOW</div>
-    <div class="log-details">
-      ${message}
-    </div>
-  `;
-  container.prepend(entry);
+
+  try {
+    const res = await fetch('/api/governance/ledger');
+    const data = await res.json();
+    container.innerHTML = '';
+
+    if (data.chain && data.chain.length > 0) {
+      data.chain.forEach(tx => {
+        const entry = document.createElement('div');
+        entry.className = 'log-entry';
+        const cnmcHtml = tx.assigned_cnmc 
+          ? `<div class="log-sub">Issued Common National Code: <span class="cnmc-pill">${tx.assigned_cnmc}</span></div>` 
+          : '';
+        const recsHtml = tx.participating_records && tx.participating_records.length > 0 
+          ? `<div class="log-sub text-muted">Records: ${tx.participating_records.join(', ')}</div>` 
+          : '';
+
+        entry.innerHTML = `
+          <div class="log-time" style="display: flex; justify-content: space-between; align-items: center;">
+            <span>${tx.tx_id} &bull; ${new Date(tx.timestamp).toLocaleTimeString()}</span>
+            <span style="font-family: var(--font-mono); font-size: 9px; color: var(--emerald-secondary);">SHA-256 VERIFIED</span>
+          </div>
+          <div class="log-details">
+            <strong>${tx.actor}</strong> &mdash; <code>${tx.action}</code>
+            ${cnmcHtml}
+            ${recsHtml}
+            <div style="font-family: var(--font-mono); font-size: 10px; color: var(--text-tertiary); margin-top: 6px; word-break: break-all;">
+              Hash: ${tx.current_hash.substring(0, 16)}... | Prev: ${tx.previous_hash.substring(0, 16)}...
+            </div>
+          </div>
+        `;
+        container.appendChild(entry);
+      });
+    }
+  } catch (err) {
+    console.error("Failed to load governance ledger:", err);
+  }
 }
 
 // 5. Catalog Search

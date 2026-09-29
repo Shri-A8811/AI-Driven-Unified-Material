@@ -72,3 +72,18 @@ def test_csv_export(client):
     content = res.text
     assert "COMMON_NATIONAL_CODE_CNMC" in content
     assert "LOCAL_MATERIAL_CODE" in content
+
+
+def test_governance_ledger_endpoint(client):
+    res = client.get("/api/governance/ledger")
+    assert res.status_code == 200
+    data = res.json()
+    assert data["integrity_verified"] is True
+    assert data["total_blocks"] >= 2  # Genesis + initial valve approval
+    assert len(data["chain"]) >= 2
+    # Verify latest block structure
+    latest = data["chain"][0]
+    assert "current_hash" in latest
+    assert "previous_hash" in latest
+    assert "actor" in latest
+
